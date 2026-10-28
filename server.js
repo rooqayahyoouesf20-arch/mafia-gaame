@@ -1,3 +1,4 @@
+
 // خادم لعبة المافيا — بدون أي مكتبات خارجية (Node.js فقط): HTTP + Server-Sent Events
 const http = require('http'), fs = require('fs'), path = require('path'), crypto = require('crypto');
 const PORT = process.env.PORT || 3000;
@@ -11,6 +12,14 @@ const newCode = () => { const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s; do 
 const clean = s => String(s || '').replace(/[<>]/g, '').trim().slice(0, 16);
 
 const alive = r => r.players.filter(p => p.alive);
+// الأهداف المسموحة لكل دور في الليل
+function targetsFor(r, p) {
+  const a = alive(r);
+  if (p.role === 'mafia') return a.filter(x => x.role !== 'mafia').map(x => x.id);
+  if (p.role === 'detective') return a.filter(x => x.id !== p.id && !p.checked.includes(x.id)).map(x => x.id);
+  if (p.role === 'doctor') return a.filter(x => x.id === p.id ? !p.selfUsed : x.id !== p.lastProtect).map(x => x.id);
+  return [];
+}
 const sys = (r, text) => r.chat.push({ sys: 1, text, t: Date.now() });
 function setPhase(r, phase, secs, fn) {
   clearTimeout(r.timer); r.phase = phase;
@@ -75,7 +84,7 @@ function view(r, pid) {
       id: p.id, name: p.name, alive: p.alive, host: p.id === r.host, seen: p.seen,
       role: (!p.alive || over || p.id === pid || (mafMe && p.role === 'mafia')) ? p.role : null
     })),
-    me: { id: pid, role: me.role, alive: me.alive, checks: me.checks, act: (r.acts[pid] || {}).target || null, vote: r.votes[pid] || null, ready: r.ready.has(pid), seen: me.seen },
+    me: { id: pid, role: me.role, alive: me.alive, checks: me.checks, targets: r.phase === 'night' && me.alive && !r.acts[pid] ? targetsFor(r, me) : [], selfUsed: me.selfUsed, act: (r.acts[pid] || {}).target || null, vote: r.votes[pid] || null, ready: r.ready.has(pid), seen: me.seen },
     chat: r.chat.slice(-100)
   };
 }
@@ -88,7 +97,7 @@ function api(b) {
     const name = clean(b.name); if (!name) return { error: 'اكتب اسمك أولاً' };
     const max = clamp(b.max, 4, 12), mafia = clamp(b.mafia, 1, Math.floor((max - 1) / 2));
     const r = { code: newCode(), host: null, max, mafia, phase: 'lobby', round: 0, players: [], chat: [], clients: new Map(), acts: {}, votes: {}, ready: new Set(), timer: null, deadline: null, winner: null, announce: null, lastResult: null, last: Date.now() };
-    const p = { id: uid(), name, alive: true, role: null, seen: false, checks: [] };
+    const p = { id: uid(), name, alive: true, role: null, seen: false, checks: [], checked: [], selfUsed: false, lastProtect: null };
     r.host = p.id; r.players.push(p); rooms.set(r.code, r);
     return { ok: 1, code: r.code, pid: p.id };
   }
@@ -99,7 +108,7 @@ function api(b) {
     if (r.phase !== 'lobby') return { error: 'اللعبة بدأت بالفعل' };
     if (r.players.length >= r.max) return { error: 'الغرفة ممتلئة' };
     if (r.players.some(p => p.name === name)) return { error: 'الاسم مستخدم، اختر اسماً آخر' };
-    const p = { id: uid(), name, alive: true, role: null, seen: false, checks: [] };
+    const p = { id: uid(), name, alive: true, role: null, seen: false, checks: [], checked: [], selfUsed: false, lastProtect: null };
     r.players.push(p); sys(r, `${name} انضم إلى الغرفة`); push(r);
     return { ok: 1, code: r.code, pid: p.id };
   }
@@ -113,7 +122,7 @@ function api(b) {
       const n = r.players.length; if (n < 4) return { error: 'تحتاج 4 لاعبين على الأقل' };
       r.mafia = Math.min(r.mafia, Math.floor((n - 1) / 2));
       const roles = shuffle([...Array(r.mafia).fill('mafia'), 'detective', 'doctor', ...Array(n - r.mafia - 2).fill('citizen')]);
-      r.players.forEach((p, i) => { p.role = roles[i]; p.alive = true; p.seen = false; p.checks = []; });
+      r.players.forEach((p, i) => { p.role = roles[i]; p.alive = true; p.seen = false; p.checks = []; p.checked = []; p.selfUsed = false; p.lastProtect = null; });
       r.round = 0; r.winner = null; r.announce = null; r.chat = [];
       sys(r, 'بدأت اللعبة! كل لاعب يكشف دوره سرّاً.');
       setPhase(r, 'reveal', T.reveal, () => startNight(r)); break;
@@ -124,13 +133,14 @@ function api(b) {
     case 'night': {
       const tg = target();
       if (r.phase !== 'night' || !me.alive || r.acts[me.id] || !tg) return { error: 'إجراء غير صالح' };
-      if (me.role === 'mafia' && tg.role === 'mafia') return { error: 'لا يمكنك استهداف زميلك' };
-      if (me.role === 'detective' && tg.id === me.id) return { error: 'لا يمكنك التحقق من نفسك' };
       if (!['mafia', 'detective', 'doctor'].includes(me.role)) return { error: 'ليس لديك قدرة' };
+      if (!targetsFor(r, me).includes(tg.id)) return { error: me.role === 'doctor' ? 'لا يمكنك حماية نفس اللاعب مرتين متتاليتين، وحماية نفسك مسموحة مرة واحدة فقط' : 'اختيار غير مسموح' };
+      if (me.role === 'doctor') { if (tg.id === me.id) me.selfUsed = true; me.lastProtect = tg.id; }
+      if (me.role === 'detective') me.checked.push(tg.id);
       r.acts[me.id] = { target: tg.id };
       if (me.role === 'detective') me.checks.push({ name: tg.name, mafia: tg.role === 'mafia', round: r.round });
       const actors = alive(r).filter(p => ['mafia', 'detective', 'doctor'].includes(p.role));
-      if (actors.every(p => r.acts[p.id])) resolveNight(r); break;
+      if (actors.every(p => r.acts[p.id] || !targetsFor(r, p).length)) resolveNight(r); break;
     }
     case 'ready':
       if (r.phase !== 'day' || !me.alive) break;
@@ -142,6 +152,7 @@ function api(b) {
       r.votes[me.id] = b.target;
       if (alive(r).every(p => r.votes[p.id])) resolveVote(r); break;
     }
+    case 'sync': return { ok: 1 };
     case 'chat': {
       const text = String(b.text || '').trim().slice(0, 300);
       if (!text || !(me.alive || ['lobby', 'over'].includes(r.phase)) || ['reveal', 'night'].includes(r.phase)) return { error: 'لا يمكنك الكتابة الآن' };
@@ -149,7 +160,7 @@ function api(b) {
     }
     case 'again':
       if (r.host !== me.id || r.phase !== 'over') return { error: 'غير مسموح' };
-      r.players.forEach(p => { p.role = null; p.alive = true; p.checks = []; p.seen = false; });
+      r.players.forEach(p => { p.role = null; p.alive = true; p.checks = []; p.seen = false; p.checked = []; p.selfUsed = false; p.lastProtect = null; });
       r.winner = null; r.announce = null; r.lastResult = null; r.chat = []; setPhase(r, 'lobby', 0); break;
     case 'leave':
       if (r.phase !== 'lobby') break;
@@ -170,7 +181,7 @@ http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     if (!r.clients.has(pid)) r.clients.set(pid, new Set()); r.clients.get(pid).add(res);
     res.write(`data: ${JSON.stringify(view(r, pid))}\n\n`);
-    const hb = setInterval(() => res.write(': ping\n\n'), 20000);
+    const hb = setInterval(() => res.write('event: ping\ndata: 1\n\n'), 15000);
     req.on('close', () => { clearInterval(hb); r.clients.get(pid) && r.clients.get(pid).delete(res); });
     return;
   }
