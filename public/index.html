@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>المافيا</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Reem+Kufi:wght@500;700&family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root{--ink:#0c090b;--smoke:#1c1519;--smoke2:#2a2025;--blood:#a3202f;--blood2:#d13446;--brass:#c9a45c;--paper:#ece3d3;--mute:#9a8f90;--ok:#3fae6a;--bad:#d13446;
@@ -51,6 +52,18 @@ button:disabled{opacity:.4;cursor:default}
 .m{margin:4px 0;word-break:break-word}.m b{color:var(--brass)}.m.s{color:var(--mute);text-align:center;font-size:.85rem}
 #chat .row{margin-top:6px}#chat button{width:90px;margin:6px 0 0}
 .tl{margin-top:10px;font-size:.9rem;color:var(--mute)}
+button{touch-action:manipulation}body::before,body::after{will-change:transform}
+#bar{display:flex;gap:8px;justify-content:center;margin:6px 0 0}#bar button{width:auto;margin:0;padding:6px 12px;font-size:.85rem}
+#net{display:none;text-align:center;background:#3a1219;border:1px solid var(--blood);border-radius:10px;padding:8px;margin:8px 0;font-size:.9rem}
+.dev{display:grid;gap:12px}.dev button{padding:18px;font-size:1.2rem}
+.d-tablet #app{max-width:860px;font-size:18px}.d-tablet .grid{grid-template-columns:repeat(3,1fr)}.d-tablet #msgs{height:300px}
+.d-pc #app{max-width:1400px;display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:0 24px;align-items:start;min-height:100vh;padding:24px 40px}
+.d-pc h1,.d-pc .sub,.d-pc #bar,.d-pc #net{grid-column:1/-1}
+.d-pc #chat{position:sticky;top:16px;margin-top:14px}.d-pc #msgs{height:calc(100vh - 230px)}
+.d-pc .grid{grid-template-columns:repeat(4,1fr)}
+.d-pc #app.nochat #main{grid-column:1/-1;max-width:760px;margin:0 auto;width:100%}
+.d-pc #main.home{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;grid-column:1/-1;max-width:none!important}
+.d-pc #main.home .err{grid-column:1/-1}
 @media (prefers-reduced-motion:reduce){*,body::before,body::after{animation:none!important}}
 </style>
 </head>
@@ -58,6 +71,8 @@ button:disabled{opacity:.4;cursor:default}
 <div id="app">
   <h1>المافيا</h1>
   <div class="sub" id="sub">من بينكم قاتل… اكتشفوه قبل فوات الأوان</div>
+  <div id="bar" style="display:none"><button class="ghost" id="rc">🔄 إعادة الاتصال</button><button class="ghost" id="hm">🏠 الرئيسية</button><button class="ghost" id="dv">📱 تغيير الجهاز</button></div>
+  <div id="net">⚠️ انقطع الاتصال… جاري إعادة المحاولة تلقائياً (لا تحتاج تحديث الصفحة)</div>
   <div id="main"></div>
   <div id="chat" class="card" style="display:none">
     <h2>الدردشة</h2>
@@ -76,6 +91,11 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 let ses = JSON.parse(localStorage.getItem('mafia') || 'null'), S = null, es = null, sel = null, shown = false, key = '', msgCount = -1, homeErr = '';
 
+let dev = localStorage.getItem('mdev'), paused = false, retry = 0, last = 0, rt = null, lastSig = '';
+const applyDev = () => { document.body.className = dev ? 'd-' + dev : ''; };
+const net = on => { $('net').style.display = on ? 'block' : 'none'; };
+function devScreen() { return `<div class="card dev"><h2>على أي جهاز تلعب؟</h2><div class="sub" style="margin:0">نضبط الواجهة حسب شاشتك</div><button data-dev="phone">📱 جوال</button><button data-dev="tablet">📲 آيباد / تابلت</button><button data-dev="pc">🖥️ كمبيوتر</button></div>`; }
+function bar() { $('bar').style.display = dev ? 'flex' : 'none'; $('rc').style.display = $('hm').style.display = (ses && S) ? '' : 'none'; }
 async function api(b) {
   try {
     const r = await fetch('/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...b, code: b.code || (ses && ses.code), pid: ses && ses.pid }) });
@@ -83,13 +103,27 @@ async function api(b) {
   } catch { return { error: 'تعذر الاتصال بالخادم' }; }
 }
 function connect() {
-  if (es) es.close();
+  if (!ses) return;
+  if (es) es.close(); clearTimeout(rt);
   es = new EventSource(`/events?code=${ses.code}&pid=${ses.pid}`);
-  es.onmessage = e => { S = JSON.parse(e.data); render(); };
-  es.onerror = () => { if (es.readyState === 2) leaveLocal('انتهت الجلسة أو أُغلقت الغرفة'); };
+  es.onopen = () => { retry = 0; net(false); };
+  es.onmessage = e => { last = Date.now(); net(false); S = JSON.parse(e.data); render(); };
+  es.addEventListener('ping', () => { last = Date.now(); });
+  es.onerror = () => { es.close(); net(true); reconnectLater(); };
 }
+function reconnectLater() {
+  clearTimeout(rt);
+  rt = setTimeout(async () => {
+    if (!ses || paused) return;
+    const r = await api({ type: 'sync' });
+    if (r.error && r.error.includes('غير موجود')) { leaveLocal('هذي الغرفة لم تعد موجودة (الخادم أُعيد تشغيله). أنشئ غرفة جديدة.'); return; }
+    connect();
+  }, Math.min(1000 * 2 ** retry++, 8000));
+}
+function pause() { if (es) es.close(); clearTimeout(rt); paused = true; S = null; key = ''; lastSig = ''; msgCount = -1; net(false); render(); }
 function leaveLocal(msg) {
-  if (es) es.close(); localStorage.removeItem('mafia'); ses = null; S = null; homeErr = msg || ''; key = ''; render();
+  if (es) es.close(); clearTimeout(rt); localStorage.removeItem('mafia'); ses = null; S = null; paused = false;
+  homeErr = msg || ''; key = ''; lastSig = ''; msgCount = -1; net(false); render();
 }
 async function act(type, extra) {
   const r = await api({ type, ...extra });
@@ -138,7 +172,9 @@ function views() {
     let past = '';
     if (m.role === 'detective' && m.checks.length) past = m.checks.map(c => `<div class="box ${c.mafia ? 'good' : 'bad'}">${c.mafia ? '✓' : '✗'} ${esc(c.name)}: ${c.mafia ? 'من المافيا' : 'ليس من المافيا'}</div>`).join('');
     if (acted) return head + `<div class="sleep"><div class="moon">${r.e}</div>اخترت: <b>${name(acted)}</b><br>بانتظار الآخرين…</div>${past}</div>`;
-    return head + `<p>${r.e} <b>${r.n}</b> — ${label}</p>${picker('night', 'تأكيد', { not: p => (m.role === 'mafia' && p.role === 'mafia') || (m.role === 'detective' && p.id === m.id) })}${past}</div>`;
+    if (!m.targets.length) return head + `<div class="sleep"><div class="moon">${r.e}</div>لا يوجد هدف متاح لك هذه الليلة.<br>بانتظار الآخرين…</div></div>`;
+    const hint = m.role === 'doctor' ? `<div class="tl">${m.selfUsed ? 'استخدمت حماية نفسك سابقاً' : 'يمكنك حماية نفسك مرة واحدة فقط'} · لا يمكنك حماية نفس اللاعب مرتين متتاليتين</div>` : m.role === 'detective' ? '<div class="tl">لا يمكنك التحقق من نفس اللاعب مرتين</div>' : '';
+    return head + `<p>${r.e} <b>${r.n}</b> — ${label}</p>${picker('night', 'تأكيد', { not: p => !m.targets.includes(p.id) })}${hint}${past}</div>`;
   }
   if (ph === 'day' || ph === 'vote') {
     const an = S.announce, lines = an ? (an.kind === 'kill' ? `<div class="box bad">☠️ قُتل <b>${esc(an.name)}</b> في الليل — كان ${R[an.role].n}.</div>` : `<div class="box good">${an.saved ? '💉 حاولت المافيا القتل لكن الدكتور أنقذ الضحية!' : '🌅 مرّت الليلة بسلام.'}</div>`) : '';
@@ -161,7 +197,7 @@ function views() {
   return '';
 }
 function home() {
-  return `<div class="card"><h2>اسمك</h2><input id="nm" maxlength="16" placeholder="اكتب اسمك" value="${esc(localStorage.getItem('mname') || '')}"></div>
+  return `${ses ? `<div class="card"><h2>غرفتك الحالية</h2><div class="code" style="cursor:default">${ses.code}</div><button id="rs">العودة إلى الغرفة</button><button class="ghost" id="fg">نسيان الغرفة</button></div>` : ''}<div class="card"><h2>اسمك</h2><input id="nm" maxlength="16" placeholder="اكتب اسمك" value="${esc(localStorage.getItem('mname') || '')}"></div>
   <div class="card"><h2>إنشاء غرفة</h2>
     <div class="row"><div><label>عدد اللاعبين</label><select id="mx">${[4,5,6,7,8,9,10,11,12].map(n => `<option ${n === 6 ? 'selected' : ''}>${n}</option>`).join('')}</select></div>
     <div><label>عدد المافيا</label><select id="mf"></select></div></div>
@@ -170,21 +206,30 @@ function home() {
   <div class="err" id="err">${esc(homeErr)}</div>`;
 }
 function bindHome() {
+  if ($('rs')) { $('rs').onclick = () => { paused = false; connect(); history.pushState({ r: 1 }, ''); }; $('fg').onclick = () => leaveLocal(); }
   const fill = () => { const m = Math.floor(($('mx').value - 1) / 2); $('mf').innerHTML = Array.from({ length: m }, (_, i) => `<option ${i + 1 === (m > 1 ? 2 : 1) && m > 2 ? 'selected' : ''}>${i + 1}</option>`).join(''); };
   $('mx').onchange = fill; fill();
-  const enter = r => { if (r.error) { $('err').textContent = r.error; return; } ses = { code: r.code, pid: r.pid }; localStorage.setItem('mafia', JSON.stringify(ses)); localStorage.setItem('mname', $('nm').value.trim()); connect(); };
+  const enter = r => { if (r.error) { $('err').textContent = r.error; return; } ses = { code: r.code, pid: r.pid }; localStorage.setItem('mafia', JSON.stringify(ses)); localStorage.setItem('mname', $('nm').value.trim()); paused = false; connect(); history.pushState({ r: 1 }, ''); };
   $('cr').onclick = async () => enter(await api({ type: 'create', name: $('nm').value, max: $('mx').value, mafia: $('mf').value }));
   $('jn').onclick = async () => enter(await api({ type: 'join', name: $('nm').value, code: $('jc').value.trim() }));
 }
 function render(keepScroll) {
   const main = $('main'), chat = $('chat');
-  if (!ses || !S) { chat.style.display = 'none'; if (key !== 'home') { key = 'home'; main.innerHTML = home(); bindHome(); } return; }
+  if (!dev) { $('app').classList.add('nochat'); chat.style.display = 'none'; main.className = ''; key = ''; lastSig = ''; main.innerHTML = devScreen(); document.querySelectorAll('[data-dev]').forEach(b => b.onclick = () => { dev = b.dataset.dev; localStorage.setItem('mdev', dev); applyDev(); key = ''; render(); }); bar(); return; }
+  if (!ses || !S) { chat.style.display = 'none'; $('app').classList.add('nochat'); bar(); const hk = 'home' + (ses ? ses.code : ''); if (key !== hk) { key = hk; lastSig = ''; main.className = 'home'; main.innerHTML = home(); bindHome(); } return; }
+  main.className = ''; bar();
+  const sig = JSON.stringify([S.phase, S.round, S.winner, S.announce, S.result, S.players, S.me, S.isHost, S.deadline]);
+  if (!keepScroll && sig === lastSig) { chatUpdate(); return; }
+  lastSig = sig;
   const k = S.phase + S.round + (S.me.act || '') + (S.me.vote || '') + S.me.seen + S.me.alive + S.players.length + S.players.filter(p => p.seen).length + S.me.ready + (S.result ? 1 : 0) + S.players.map(p => p.alive ? 1 : 0).join('');
   if (k !== key + '' && !keepScroll) { sel = null; if (S.phase !== 'reveal') shown = false; }
   key = k;
-  main.innerHTML = views(); bind();
+  main.innerHTML = views(); bind(); chatUpdate();
+}
+function chatUpdate() {
+  const chat = $('chat');
   const showChat = ['lobby', 'day', 'vote', 'result', 'over'].includes(S.phase);
-  chat.style.display = showChat ? '' : 'none';
+  chat.style.display = showChat ? '' : 'none'; $('app').classList.toggle('nochat', !showChat);
   const can = S.me.alive || ['lobby', 'over'].includes(S.phase);
   $('ci').disabled = $('cs').disabled = !can; $('ci').placeholder = can ? 'اكتب رسالة…' : 'الأموات لا يتحدثون';
   if (S.chat.length !== msgCount) {
@@ -205,7 +250,15 @@ function bind() {
 }
 async function send() { const i = $('ci'), t = i.value.trim(); if (!t) return; i.value = ''; act('chat', { text: t }); }
 $('cs').onclick = send; $('ci').onkeydown = e => { if (e.key === 'Enter') send(); };
-if (ses) connect(); else render();
+$('rc').onclick = () => { retry = 0; connect(); };
+$('hm').onclick = pause;
+$('dv').onclick = () => { localStorage.removeItem('mdev'); dev = null; applyDev(); key = ''; render(); };
+window.addEventListener('popstate', () => { if (ses && S && !paused) pause(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden && ses && !paused && (!es || es.readyState !== 1 || Date.now() - last > 30000)) { retry = 0; connect(); } });
+window.addEventListener('online', () => { if (ses && !paused) { retry = 0; connect(); } });
+setInterval(() => { if (ses && S && !paused && Date.now() - last > 40000) { if (es) es.close(); net(true); reconnectLater(); } }, 10000);
+applyDev();
+if (ses) { last = Date.now(); connect(); } else render();
 </script>
 </body>
 </html>
